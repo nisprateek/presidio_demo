@@ -1,7 +1,7 @@
 """
 Helper methods for the Presidio Streamlit app
 """
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import logging
 import streamlit as st
 from presidio_analyzer import (
@@ -12,6 +12,7 @@ from presidio_analyzer import (
     Pattern,
 )
 from presidio_analyzer.nlp_engine import NlpEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
@@ -28,6 +29,7 @@ from src.presidio_nlp_engine_config import (
     create_nlp_engine_with_stanza,
     create_nlp_engine_with_llm
 )
+from src.llm_recognizer import LlmRecognizer
 
 logger = logging.getLogger("presidio-streamlit")
 
@@ -70,6 +72,7 @@ def analyzer_engine(
     model_path: str,
     ta_key: Optional[str] = None,
     ta_endpoint: Optional[str] = None,
+    custom_entities: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> AnalyzerEngine:
     """Create the NLP Engine instance based on the requested model.
     :param model_family: Which model package to use for NER.
@@ -79,9 +82,13 @@ def analyzer_engine(
         "en_core_web_lg"
     :param ta_key: Key to the Text Analytics endpoint (only if model_path = "Azure Text Analytics")
     :param ta_endpoint: Endpoint of the Text Analytics instance (only if model_path = "Azure Text Analytics")
+    :param custom_entities: Dictionary of custom entities with descriptions and examples
     """
-    nlp_engine, registry = nlp_engine_and_registry(
-        model_family, model_path)
+    if 'openai' in model_family.lower():
+        nlp_engine, registry = create_nlp_engine_with_llm(model_path, custom_entities)
+    else:
+        nlp_engine, registry = nlp_engine_and_registry(model_family, model_path)
+        
     analyzer = AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
     return analyzer
 
@@ -94,11 +101,17 @@ def anonymizer_engine():
 
 @st.cache_data
 def get_supported_entities(
-    model_family: str, model_path: str):
-    """Return supported entities from the Analyzer Engine."""
-    return analyzer_engine(
-        model_family, model_path
+    model_family: str, model_path: str, custom_entities=None):
+    """Return supported entities from the Analyzer Engine including custom entities."""
+    supported = analyzer_engine(
+        model_family, model_path, custom_entities=custom_entities
         ).get_supported_entities() + ["GENERIC_PII"]
+    
+    # Add custom entities to the list
+    if custom_entities:
+        supported = list(set(supported + list(custom_entities.keys())))
+    
+    return supported
 
 
 @st.cache_data
@@ -118,8 +131,11 @@ def analyze(
         ad_hoc_recognizer = create_ad_hoc_regex_recognizer(*kwargs["regex_params"])
         kwargs["ad_hoc_recognizers"] = [ad_hoc_recognizer] if ad_hoc_recognizer else []
         del kwargs["regex_params"]
+        
+    # Extract custom_entities from kwargs if present
+    custom_entities = kwargs.pop("custom_entities", None)
 
-    return analyzer_engine(model_family, model_path).analyze(
+    return analyzer_engine(model_family, model_path, custom_entities=custom_entities).analyze(
         **kwargs
     )
 
@@ -254,3 +270,22 @@ def create_ad_hoc_regex_recognizer(
         supported_entity=entity_type, patterns=[pattern], context=context
     )
     return regex_recognizer
+
+
+def create_nlp_engine_with_llm(model, custom_entities=None):
+    registry = RecognizerRegistry()
+    registry.load_predefined_recognizers()
+
+    llm_recognizer = LlmRecognizer(model_name=model, custom_entities=custom_entities)
+
+    nlp_configuration = {
+        "nlp_engine_name": "spacy",
+        "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+    }
+
+    nlp_engine = NlpEngineProvider(nlp_configuration=nlp_configuration).create_engine()
+
+    registry.add_recognizer(llm_recognizer)
+    registry.remove_recognizer("SpacyRecognizer")
+
+    return nlp_engine, registry

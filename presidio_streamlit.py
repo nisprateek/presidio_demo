@@ -214,11 +214,73 @@ with st_deny_allow_expander:
     st.caption(
         "Denylists contain words that are considered PII, but are not detected as such."
     )
+
+# Add this section in the sidebar, below the entity selection
+st_custom_entities_expander = st.sidebar.expander("Add custom entity types", expanded=False)
+custom_entities = {}
+
+with st_custom_entities_expander:
+    st.markdown("Define custom entity types to detect")
+    
+    # Initialize session state for custom entities if not exists
+    if 'custom_entities' not in st.session_state:
+        st.session_state.custom_entities = {}
+    
+    # Add new custom entity
+    new_entity_name = st.text_input("Entity name (e.g., MEDICAL_CONDITION)", key="new_entity_name")
+    new_entity_description = st.text_area("Description", key="new_entity_description", 
+                                         placeholder="e.g., Medical conditions, diseases, or diagnoses")
+    new_entity_examples = st.text_input("Examples (comma separated)", key="new_entity_examples",
+                                         placeholder="e.g., diabetes, hypertension, asthma")
+    
+    # Use a callback to update state when button is clicked
+    def on_add_entity():
+        if new_entity_name and new_entity_description:
+            entity_key = new_entity_name.strip().upper()
+            st.session_state.custom_entities[entity_key] = {
+                'description': new_entity_description,
+                'examples': new_entity_examples
+            }
+    
+    st.button("Add Custom Entity", on_click=on_add_entity)
+    
+    # Display and manage existing custom entities
+    if st.session_state.custom_entities:
+        st.markdown("### Current Custom Entities")
+        
+        # Create a copy of the keys to safely iterate and modify
+        entities_to_remove = []
+        
+        for entity, details in st.session_state.custom_entities.items():
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f"**{entity}**: {details['description']}")
+                if details['examples']:
+                    st.markdown(f"*Examples*: {details['examples']}")
+            with col2:
+                # Create a unique key for each button
+                if st.button("Remove", key=f"remove_{entity}"):
+                    entities_to_remove.append(entity)
+        
+        # Remove any entities marked for removal
+        for entity in entities_to_remove:
+            if entity in st.session_state.custom_entities:
+                del st.session_state.custom_entities[entity]
+
 # Main panel
 
 analyzer_load_state = st.info("Starting Presidio analyzer...")
-
+if st_model_package.lower() == "openai":
+    analyzer = analyzer_engine(st_model_package, st_model, custom_entities=custom_entities)
+else:
+    analyzer = analyzer_engine(*analyzer_params)
 analyzer_load_state.empty()
+
+# Move the debug info without st_entities reference
+st.sidebar.expander("Debug Information", expanded=False).text(
+    f"Model: {st_model_package}/{st_model}\n"
+    f"Custom entities: {list(custom_entities.keys())}"
+)
 
 # Read default text
 with open("demo_text.txt") as f:
@@ -235,18 +297,33 @@ st_text = col1.text_area(
 
 try:
     # Choose entities
+    custom_entities = st.session_state.get('custom_entities', {})
     st_entities_expander = st.sidebar.expander("Choose entities to look for")
     st_entities = st_entities_expander.multiselect(
         label="Which entities to look for?",
-        options=get_supported_entities(*analyzer_params),
-        default=list(get_supported_entities(*analyzer_params)),
+        options=get_supported_entities(*analyzer_params, custom_entities=custom_entities),
+        default=list(get_supported_entities(*analyzer_params, custom_entities=custom_entities)),
         help="Limit the list of PII entities detected. "
         "This list is dynamic and based on the NER model and registered recognizers. "
     )
 
-    # Before
+    # Modify the analyzer creation to use custom entities
+    custom_entities = st.session_state.get('custom_entities', {})
+
+    # Update where you create your analyzer/NLP engine
+    # This requires updating the creation of NLP engine to pass custom_entities
+    # Example:
+    # Replace this line:
+    # analyzer_load_state = st.info("Starting Presidio analyzer...")
+    # analyzer = analyzer_engine(*analyzer_params)
+    # analyzer_load_state.empty()
+
+    # With:
     analyzer_load_state = st.info("Starting Presidio analyzer...")
-    analyzer = analyzer_engine(*analyzer_params)
+    if st_model_package.lower() == "openai":
+        analyzer = analyzer_engine(st_model_package, st_model, custom_entities=custom_entities)
+    else:
+        analyzer = analyzer_engine(*analyzer_params)
     analyzer_load_state.empty()
 
     st_analyze_results = analyze(
@@ -258,6 +335,7 @@ try:
         return_decision_process=st_return_decision_process,
         allow_list=st_allow_list,
         deny_list=st_deny_list,
+        custom_entities=custom_entities,
     )
 
     # After
@@ -319,6 +397,25 @@ try:
         st.dataframe(df_subset.reset_index(drop=True), use_container_width=True)
     else:
         st.text("No findings")
+
+    # Add this where you want to see the debug output
+    with st.expander("Debug Information", expanded=False):
+        st.write(f"### Entities being searched:")
+        st.json(st_entities)
+        
+        st.write(f"### Custom entities:")
+        st.json(custom_entities)
+        
+        # Add a callback to capture and display the next LLM response
+        if 'llm_debug' not in st.session_state:
+            st.session_state.llm_debug = {
+                'prompt': '',
+                'response': ''
+            }
+            
+        st.write("### Last LLM interaction:")
+        st.text_area("Prompt:", value=st.session_state.llm_debug.get('prompt', ''), height=200)
+        st.text_area("Response:", value=st.session_state.llm_debug.get('response', ''), height=200)
 
 except Exception as e:
     print(e)

@@ -9,6 +9,8 @@ import argparse
 import logging
 from pathlib import Path
 import dotenv
+import json
+from typing import Dict, Optional
 
 from src.presidio_helpers import (
     analyze,
@@ -54,6 +56,8 @@ def parse_args():
                         help="Number of characters to mask (if using mask)")
     parser.add_argument("--encrypt_key", type=str, default="WmZq4t7w!z%C&F)J",
                         help="Key for encryption (if using encrypt)")
+    parser.add_argument("--custom_entities", type=str, default=None,
+                        help="Path to JSON file defining custom entities")
     
     return parser.parse_args()
 
@@ -78,7 +82,7 @@ def is_binary_file(file_path):
         return True
 
 def process_file(file_path, output_path, model_package, model_name, anonymization, entities, 
-                 threshold, mask_char=None, num_chars=None, encrypt_key=None):
+                 threshold, mask_char=None, num_chars=None, encrypt_key=None, custom_entities=None):
     """Process a single file."""
     logger.info(f"Processing file: {file_path}")
     
@@ -114,6 +118,7 @@ def process_file(file_path, output_path, model_package, model_name, anonymizatio
             entities=entities,
             language="en",
             score_threshold=threshold,
+            custom_entities=custom_entities,
         )
     except Exception as e:
         error_msg = f"Error analyzing file {file_path}: {e}"
@@ -146,12 +151,41 @@ def process_file(file_path, output_path, model_package, model_name, anonymizatio
         logger.error(error_msg)
         return 0
 
+def load_custom_entities(json_path: str) -> Optional[Dict[str, Dict[str, str]]]:
+    """Load custom entities from a JSON file."""
+    if not json_path:
+        return None
+        
+    try:
+        with open(json_path, 'r') as f:
+            custom_entities = json.load(f)
+        
+        # Validate format
+        for entity_name, entity_info in custom_entities.items():
+            if not isinstance(entity_info, dict):
+                logger.error(f"Invalid format for entity {entity_name}. Expected dict, got {type(entity_info)}")
+                return None
+                
+            if 'description' not in entity_info:
+                logger.warning(f"No description provided for custom entity {entity_name}")
+                custom_entities[entity_name]['description'] = f"Custom entity type: {entity_name}"
+                
+        return custom_entities
+    except Exception as e:
+        logger.error(f"Error loading custom entities file: {e}")
+        return None
+
 def main():
     """Main entry point."""
     args = parse_args()
     
     # Extract model package and name
     model_package, model_name = args.model.lower().split("/")
+    
+    # Load custom entities if specified
+    custom_entities = load_custom_entities(args.custom_entities)
+    if custom_entities:
+        logger.info(f"Loaded {len(custom_entities)} custom entity types")
     
     # Create output folder if it doesn't exist
     output_folder = Path(args.output_folder)
@@ -160,6 +194,9 @@ def main():
     # Get entities to detect
     if args.entities:
         entities = args.entities
+        # Add custom entities to the detection list
+        if custom_entities:
+            entities = list(set(entities + list(custom_entities.keys())))
     else:
         entities = get_supported_entities(model_package, model_name)
         logger.info(f"Using all supported entities: {entities}")
@@ -178,9 +215,9 @@ def main():
     entity_count = 0
     error_count = 0
     
-    # Initialize the analyzer engine
+    # Initialize the analyzer engine with custom entities
     logger.info(f"Initializing analyzer with model: {args.model}")
-    analyzer = analyzer_engine(model_package, model_name)
+    analyzer = analyzer_engine(model_package, model_name, custom_entities=custom_entities)
     
     # List all files in the directory
     logger.info(f"Scanning input folder: {input_folder}")
@@ -215,7 +252,8 @@ def main():
                 args.threshold,
                 args.mask_char,
                 args.num_chars,
-                args.encrypt_key
+                args.encrypt_key,
+                custom_entities=custom_entities
             )
             
             if entities_found is not None:
